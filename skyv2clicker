@@ -1,0 +1,488 @@
+--[[
+    0xC76B — Circle Auto Clicker v2 (mobile)
+    Made By GrexskyAsianBoi
+    Circle di atas tombol UI game -> tombolnya langsung di-trigger.
+    Circle di area kosong -> klik biasa (touch/mouse).
+    Titik tengah circle PUTIH = tombol UI terdeteksi.
+]]
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local GuiService       = game:GetService("GuiService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+local VIM
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
+
+-- ===================== CONFIG =====================
+local METHOD      = "auto" -- "auto" | "touch" | "mouse"  (dipakai buat klik area kosong)
+local MIN_CPS     = 1
+local MAX_CPS     = 30
+local DEFAULT_CPS = 10
+local CIRCLE_SIZE = 60
+local TOUCH_ID    = 7
+
+-- ===================== THEME (deep navy) =====================
+local THEME = {
+    bg      = Color3.fromRGB(6, 11, 28),
+    panel   = Color3.fromRGB(10, 19, 46),
+    row     = Color3.fromRGB(14, 27, 62),
+    accent  = Color3.fromRGB(58, 118, 255),
+    accent2 = Color3.fromRGB(125, 195, 255),
+    text    = Color3.fromRGB(230, 238, 255),
+    subtext = Color3.fromRGB(135, 155, 200),
+    stroke  = Color3.fromRGB(28, 48, 108),
+}
+local WHITE    = Color3.fromRGB(255, 255, 255)
+local T_FAST   = TweenInfo.new(0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local T_SMOOTH = TweenInfo.new(0.26, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+local function new(class, props, children)
+    local inst = Instance.new(class)
+    for k, v in pairs(props or {}) do inst[k] = v end
+    for _, c in ipairs(children or {}) do c.Parent = inst end
+    return inst
+end
+
+-- ===================== ROOT =====================
+local gui = Instance.new("ScreenGui")
+gui.Name = "Grexsky_" .. tostring(math.random(1000, 9999))
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true -- koordinat GUI = koordinat layar penuh
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+do
+    local ok = pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not ok or not gui.Parent then gui.Parent = PlayerGui end
+end
+
+-- ===================== STATE =====================
+local state = {running = false, cps = DEFAULT_CPS, down = false, pendingMouse = false, minimized = false}
+local acc = 0
+local cachedBtn, scanAt = nil, 0
+
+local function viewport()
+    local cam = workspace.CurrentCamera
+    return cam and cam.ViewportSize or Vector2.new(1280, 720)
+end
+
+local r = CIRCLE_SIZE / 2
+local function clampPos(p)
+    local v = viewport()
+    return Vector2.new(
+        math.clamp(p.X, r, math.max(r, v.X - r)),
+        math.clamp(p.Y, r, math.max(r, v.Y - r))
+    )
+end
+
+local targetPos = Vector2.new(viewport().X * 0.5, viewport().Y * 0.5)
+
+-- ===================== CIRCLE =====================
+local circle = new("Frame", {
+    Name = "Circle",
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Size = UDim2.fromOffset(CIRCLE_SIZE, CIRCLE_SIZE),
+    BackgroundColor3 = THEME.bg,
+    BackgroundTransparency = 0.55,
+    BorderSizePixel = 0,
+    Active = true, -- OFF: sink input biar geser circle gak muter kamera
+    ZIndex = 5,
+    Parent = gui,
+})
+new("UICorner", {CornerRadius = UDim.new(1, 0), Parent = circle})
+local circleStroke = new("UIStroke", {Color = WHITE, Thickness = 3, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = circle})
+local circleGradient = new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, THEME.accent),
+        ColorSequenceKeypoint.new(0.4, WHITE),
+        ColorSequenceKeypoint.new(0.7, Color3.fromRGB(8, 16, 44)),
+        ColorSequenceKeypoint.new(1, THEME.accent),
+    }),
+    Parent = circleStroke,
+})
+local dot = new("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(8, 8), BackgroundColor3 = THEME.accent2, BorderSizePixel = 0, ZIndex = 6, Parent = circle,
+})
+new("UICorner", {CornerRadius = UDim.new(1, 0), Parent = dot})
+
+local function applyCircle()
+    local p = clampPos(targetPos)
+    circle.Position = UDim2.fromOffset(p.X, p.Y)
+    cachedBtn, scanAt = nil, 0 -- circle pindah -> cari ulang tombol di bawahnya
+end
+applyCircle()
+
+-- ===================== MAIN WINDOW =====================
+local FINAL_SIZE = UDim2.fromOffset(236, 140)
+local TOPBAR_H   = 52
+
+local main = new("Frame", {
+    Name = "Main", Size = UDim2.fromOffset(0, 0), Position = UDim2.fromOffset(14, 64),
+    BackgroundColor3 = THEME.bg, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
+})
+new("UICorner", {CornerRadius = UDim.new(0, 12), Parent = main})
+
+local bgBase = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0, ZIndex = 0, Parent = main})
+new("UICorner", {CornerRadius = UDim.new(0, 12), Parent = bgBase})
+new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(3, 7, 20)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(13, 30, 76)),
+    }),
+    Rotation = 90, Parent = bgBase,
+})
+local aurora = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0, ZIndex = 0, Parent = main})
+new("UICorner", {CornerRadius = UDim.new(0, 12), Parent = aurora})
+local auroraGradient = new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, THEME.accent), ColorSequenceKeypoint.new(0.5, THEME.accent2), ColorSequenceKeypoint.new(1, THEME.accent),
+    }),
+    Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.4, 0.84),
+        NumberSequenceKeypoint.new(0.6, 0.9), NumberSequenceKeypoint.new(1, 1),
+    }),
+    Rotation = 20, Parent = aurora,
+})
+local stars = {}
+for i = 1, 8 do
+    local s = new("Frame", {
+        Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(math.random(14, 222), math.random(14, 126)),
+        BackgroundColor3 = Color3.fromRGB(200, 225, 255), BackgroundTransparency = 0.4, BorderSizePixel = 0, ZIndex = 0, Parent = main,
+    })
+    stars[i] = {f = s, ph = math.random() * 6.28, sp = 1 + math.random() * 2}
+end
+
+local outlineStroke = new("UIStroke", {Color = WHITE, Thickness = 1.8, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = main})
+local outlineGradient = new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, THEME.accent), ColorSequenceKeypoint.new(0.3, WHITE),
+        ColorSequenceKeypoint.new(0.6, Color3.fromRGB(8, 16, 44)), ColorSequenceKeypoint.new(1, THEME.accent),
+    }),
+    Parent = outlineStroke,
+})
+TweenService:Create(main, T_SMOOTH, {Size = FINAL_SIZE}):Play()
+
+-- header
+local topbar = new("Frame", {
+    Size = UDim2.new(1, -12, 0, 40), Position = UDim2.fromOffset(6, 6),
+    BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.1, BorderSizePixel = 0, ZIndex = 2, Parent = main,
+})
+new("UICorner", {CornerRadius = UDim.new(0, 8), Parent = topbar})
+new("UIStroke", {Color = THEME.stroke, Thickness = 1, Parent = topbar})
+
+local title = new("TextLabel", {
+    Text = "0xC76B", Font = Enum.Font.GothamBlack, TextSize = 17, TextColor3 = WHITE,
+    TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(12, 3), Size = UDim2.new(1, -90, 0, 20), ZIndex = 3, Parent = topbar,
+})
+local titleGradient = new("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, THEME.accent2), ColorSequenceKeypoint.new(0.3, WHITE),
+        ColorSequenceKeypoint.new(0.6, THEME.accent), ColorSequenceKeypoint.new(1, THEME.accent2),
+    }),
+    Parent = title,
+})
+new("TextLabel", {
+    Text = "Made By GrexskyAsianBoi", Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = THEME.subtext,
+    TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(12, 22), Size = UDim2.new(1, -90, 0, 14), ZIndex = 3, Parent = topbar,
+})
+
+local function topBtn(text, x)
+    local b = new("TextButton", {
+        Text = text, Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = THEME.subtext,
+        BackgroundColor3 = THEME.row, AutoButtonColor = false,
+        Size = UDim2.fromOffset(24, 24), Position = UDim2.new(1, x, 0.5, -12), ZIndex = 3, Parent = topbar,
+    })
+    new("UICorner", {CornerRadius = UDim.new(0, 6), Parent = b})
+    return b
+end
+local minimizeBtn = topBtn("—", -60)
+local closeBtn    = topBtn("×", -32)
+local rocketStroke = new("UIStroke", {
+    Color = THEME.accent2, Thickness = 1.5, Transparency = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = minimizeBtn,
+})
+
+-- body
+local body = new("Frame", {
+    Size = UDim2.new(1, 0, 1, -TOPBAR_H), Position = UDim2.fromOffset(0, TOPBAR_H),
+    BackgroundTransparency = 1, ZIndex = 2, Parent = main,
+})
+local function styled(props)
+    props.Font = props.Font or Enum.Font.GothamBold
+    props.TextSize = props.TextSize or 13
+    props.TextColor3 = props.TextColor3 or THEME.subtext
+    props.BackgroundColor3 = THEME.row
+    props.AutoButtonColor = false
+    props.ZIndex = 3
+    props.Parent = body
+    local b = new("TextButton", props)
+    new("UICorner", {CornerRadius = UDim.new(0, 6), Parent = b})
+    new("UIStroke", {Color = THEME.stroke, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = b})
+    return b
+end
+
+local toggleBtn = styled({
+    Text = "AUTO CLICK: OFF", Position = UDim2.fromOffset(8, 4), Size = UDim2.new(1, -16, 0, 34),
+})
+local minusBtn = styled({Text = "−", TextSize = 18, Position = UDim2.fromOffset(8, 46), Size = UDim2.fromOffset(34, 32)})
+local plusBtn  = styled({Text = "+", TextSize = 18, Position = UDim2.new(1, -42, 0, 46), Size = UDim2.fromOffset(34, 32)})
+
+local cpsBox = new("TextBox", {
+    Text = tostring(state.cps), Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = THEME.text,
+    PlaceholderText = tostring(DEFAULT_CPS), ClearTextOnFocus = false,
+    BackgroundColor3 = THEME.row, Position = UDim2.fromOffset(46, 46), Size = UDim2.new(1, -92, 0, 32), ZIndex = 3, Parent = body,
+})
+new("UICorner", {CornerRadius = UDim.new(0, 6), Parent = cpsBox})
+new("UIStroke", {Color = THEME.stroke, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = cpsBox})
+new("TextLabel", {
+    Text = "CPS", Font = Enum.Font.GothamMedium, TextSize = 10, TextColor3 = THEME.subtext,
+    TextXAlignment = Enum.TextXAlignment.Right, BackgroundTransparency = 1,
+    AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -6, 0, 0), Size = UDim2.new(0, 30, 1, 0), ZIndex = 4, Parent = cpsBox,
+})
+
+-- ===================== UI BUTTON DETECTION =====================
+local canFire = (firesignal ~= nil) or (getconnections ~= nil)
+
+local function fireSignal(sig)
+    if firesignal then return pcall(firesignal, sig) end
+    if getconnections then
+        local ok, conns = pcall(getconnections, sig)
+        if ok and type(conns) == "table" then
+            for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
+            return true
+        end
+    end
+    return false
+end
+
+local function isShown(obj)
+    local o = obj
+    while o and o ~= PlayerGui do
+        if o:IsA("GuiObject") then
+            if not o.Visible then return false end
+        elseif o:IsA("ScreenGui") then
+            if not o.Enabled then return false end
+        end
+        o = o.Parent
+    end
+    return o == PlayerGui
+end
+
+local function usable(btn)
+    if not btn.Active then return false end
+    local ok, inter = pcall(function() return btn.Interactable end)
+    if ok and inter == false then return false end
+    return true
+end
+
+-- titik circle (koordinat layar penuh) ada di dalam tombol?
+local function contains(obj, pt)
+    local sg = obj:FindFirstAncestorWhichIsA("ScreenGui")
+    local off = (sg and not sg.IgnoreGuiInset) and GuiService:GetGuiInset() or Vector2.zero
+    local p = obj.AbsolutePosition + off
+    local s = obj.AbsoluteSize
+    return pt.X >= p.X and pt.X <= p.X + s.X and pt.Y >= p.Y and pt.Y <= p.Y + s.Y
+end
+
+local function resolveButton()
+    local pt = clampPos(targetPos)
+    if cachedBtn then
+        if cachedBtn:IsDescendantOf(PlayerGui) and usable(cachedBtn) and isShown(cachedBtn) and contains(cachedBtn, pt) then
+            return cachedBtn
+        end
+        cachedBtn = nil
+    end
+    local now = os.clock()
+    if now - scanAt < 0.25 then return nil end
+    scanAt = now
+
+    local best, bestScore
+    for _, d in ipairs(PlayerGui:GetDescendants()) do
+        if d:IsA("GuiButton") and not d:IsDescendantOf(gui) and usable(d) and isShown(d) and contains(d, pt) then
+            local sg = d:FindFirstAncestorWhichIsA("ScreenGui")
+            local score = (sg and sg.DisplayOrder or 0) * 100000 + d.ZIndex
+            if not best or score >= bestScore then best, bestScore = d, score end
+        end
+    end
+    cachedBtn = best
+    return best
+end
+
+local function fireButton(btn)
+    if not canFire then return false end
+    local any = false
+    for _, name in ipairs({"MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated"}) do
+        local ok = fireSignal(btn[name])
+        any = any or ok
+    end
+    return any
+end
+
+-- ===================== CLICK ENGINE =====================
+local useTouch = (METHOD == "touch") or (METHOD == "auto" and UserInputService.TouchEnabled)
+
+local function send(down, forceMouse)
+    if not VIM then return end
+    local p = clampPos(targetPos)
+    pcall(function()
+        if useTouch and not forceMouse then
+            VIM:SendTouchEvent(TOUCH_ID, down and 0 or 2, p.X, p.Y)
+        else
+            VIM:SendMouseButtonEvent(p.X, p.Y, 0, down, game, 0)
+        end
+    end)
+end
+
+local function clickTick()
+    local btn = resolveButton()
+    dot.BackgroundColor3 = btn and WHITE or THEME.accent2
+    if btn and fireButton(btn) then return end -- tombol UI: langsung di-trigger
+    state.pendingMouse = (btn ~= nil)          -- ada tombol tapi gak bisa di-fire -> pakai mouse
+    send(true, state.pendingMouse)
+    state.down = true
+end
+
+local function setCps(n)
+    n = math.clamp(math.floor(tonumber(n) or state.cps), MIN_CPS, MAX_CPS)
+    state.cps = n
+    cpsBox.Text = tostring(n)
+end
+
+local function setRunning(v)
+    state.running = v
+    acc = 0
+    circle.Active = not v -- ON: klik tembus ke game, OFF: circle bisa digeser
+    if not v and state.down then send(false, state.pendingMouse) state.down = false end
+    circle.BackgroundTransparency = 0.55
+    dot.BackgroundColor3 = THEME.accent2
+    toggleBtn.Text = v and "AUTO CLICK: ON" or "AUTO CLICK: OFF"
+    TweenService:Create(toggleBtn, T_FAST, {
+        BackgroundColor3 = v and THEME.accent or THEME.row,
+        TextColor3 = v and WHITE or THEME.subtext,
+    }):Play()
+end
+
+toggleBtn.MouseButton1Click:Connect(function() setRunning(not state.running) end)
+minusBtn.MouseButton1Click:Connect(function() setCps(state.cps - 1) end)
+plusBtn.MouseButton1Click:Connect(function() setCps(state.cps + 1) end)
+cpsBox.FocusLost:Connect(function() setCps(cpsBox.Text) end)
+
+-- ===================== DRAG (mouse + touch) =====================
+local drags = {}
+local function makeDrag(handle, opts)
+    local d = {opts = opts}
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        if opts.canStart and not opts.canStart() then return end
+        d.input, d.from, d.data = input, input.Position, opts.onStart()
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End and d.input == input then
+                d.input = nil
+                if opts.onEnd then opts.onEnd() end
+            end
+        end)
+    end)
+    drags[#drags + 1] = d
+end
+local dragConn = UserInputService.InputChanged:Connect(function(input)
+    for _, d in ipairs(drags) do
+        if d.input and (input == d.input or input.UserInputType == Enum.UserInputType.MouseMovement) then
+            local delta = input.Position - d.from
+            d.opts.onMove(d.data, Vector2.new(delta.X, delta.Y))
+        end
+    end
+end)
+
+makeDrag(circle, {
+    canStart = function() return not state.running end,
+    onStart = function() return clampPos(targetPos) end,
+    onMove = function(origin, delta) targetPos = origin + delta applyCircle() end,
+    onEnd = function() targetPos = clampPos(targetPos) applyCircle() end,
+})
+
+makeDrag(topbar, {
+    onStart = function() return main.Position end,
+    onMove = function(origin, delta)
+        main.Position = UDim2.fromOffset(origin.X.Offset + delta.X, origin.Y.Offset + delta.Y)
+    end,
+})
+
+-- window Roblox di-resize / floating: circle tetap di posisi yang diset
+local camConn
+local function hookCamera()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    if camConn then camConn:Disconnect() end
+    camConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(applyCircle)
+end
+hookCamera()
+local camSwap = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function() hookCamera() applyCircle() end)
+
+-- ===================== MINIMIZE (— jadi 🚀) =====================
+minimizeBtn.MouseButton1Click:Connect(function()
+    state.minimized = not state.minimized
+    if state.minimized then
+        body.Visible = false
+        minimizeBtn.Text = "🚀"
+        minimizeBtn.TextSize = 15
+        TweenService:Create(rocketStroke, T_SMOOTH, {Transparency = 0.15}):Play()
+        TweenService:Create(main, T_SMOOTH, {Size = UDim2.fromOffset(FINAL_SIZE.X.Offset, TOPBAR_H)}):Play()
+    else
+        TweenService:Create(main, T_SMOOTH, {Size = FINAL_SIZE}):Play()
+        TweenService:Create(rocketStroke, T_SMOOTH, {Transparency = 1}):Play()
+        minimizeBtn.Position = UDim2.new(1, -60, 0.5, -12)
+        minimizeBtn.Text = "—"
+        minimizeBtn.TextSize = 14
+        body.Visible = true
+    end
+end)
+
+-- ===================== LOOP: animasi + klik =====================
+local hb
+hb = RunService.Heartbeat:Connect(function(dt)
+    local t = os.clock()
+    outlineGradient.Rotation = (outlineGradient.Rotation + dt * 140) % 360
+    titleGradient.Rotation   = (titleGradient.Rotation + dt * 90) % 360
+    auroraGradient.Rotation  = (auroraGradient.Rotation + dt * 10) % 360
+    circleGradient.Rotation  = (circleGradient.Rotation + dt * (state.running and 260 or 90)) % 360
+    for _, s in ipairs(stars) do
+        s.f.BackgroundTransparency = 0.5 + 0.4 * math.sin(t * s.sp + s.ph)
+    end
+    if state.minimized then
+        minimizeBtn.Position = UDim2.new(1, -60, 0.5, -12 + math.sin(t * 3) * 2)
+    end
+
+    if state.running then
+        acc += dt
+        local interval = 1 / state.cps
+        circle.BackgroundTransparency = 0.55
+        if state.down then
+            send(false, state.pendingMouse)
+            state.down = false
+        elseif acc >= interval then
+            acc = math.min(acc - interval, interval)
+            circle.BackgroundTransparency = 0.2
+            clickTick()
+        end
+    end
+end)
+
+-- ===================== CLOSE: circle ikut hilang =====================
+closeBtn.MouseButton1Click:Connect(function()
+    state.running = false
+    if state.down then send(false, state.pendingMouse) state.down = false end
+    hb:Disconnect()
+    dragConn:Disconnect()
+    if camConn then camConn:Disconnect() end
+    camSwap:Disconnect()
+    local tw = TweenService:Create(main, T_FAST, {Size = UDim2.fromOffset(0, 0)})
+    tw:Play()
+    tw.Completed:Wait()
+    gui:Destroy() -- circle ada di ScreenGui yang sama, ikut kehapus
+end)
+
+print("[0xC76B] auto clicker v2 loaded")
